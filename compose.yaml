@@ -1,0 +1,35 @@
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    pids_limit: 64
+    environment:
+      RELAY_REGISTRATION_KEY: ${RELAY_REGISTRATION_KEY:?Set a random registration key in .env}
+      PUBLIC_ORIGIN: https://${RELAY_DOMAIN:?Set your relay domain in .env}
+    expose:
+      - "8787"
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?Set your relay domain in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  caddy_data:
+  caddy_config:

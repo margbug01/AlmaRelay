@@ -1,0 +1,33 @@
+[Unit]
+Description=Private Alma encrypted relay
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+DynamicUser=true
+WorkingDirectory=/opt/alma-relay
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/alma-relay.env
+ExecStart=/opt/alma-relay/runtime/bin/node /opt/alma-relay/server.mjs
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0077
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
