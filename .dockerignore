@@ -2,4 +2,7 @@ node_modules
 .env
 .git
 test
+deploy
 *.log
+*.exe
+alma-relay

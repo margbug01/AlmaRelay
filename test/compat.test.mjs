@@ -1,12 +1,40 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { openSync, readSync, closeSync } from 'node:fs';
+import { openSync, readSync, closeSync, mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import net from 'node:net';
 import { createHash, randomBytes, webcrypto } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { once } from 'node:events';
 import http from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { createRelay } from '../server.mjs';
+
+// Builds and starts the Go relay on a free local port; its log goes to `log`.
+async function startRelay(key) {
+  const dir = mkdtempSync(join(tmpdir(), 'alma-relay-'));
+  const binary = join(dir, process.platform === 'win32' ? 'alma-relay.exe' : 'alma-relay');
+  execFileSync('go', ['build', '-o', binary, '.'], { cwd: new URL('..', import.meta.url), stdio: 'inherit' });
+  const probe = net.createServer().listen(0, '127.0.0.1');
+  await once(probe, 'listening');
+  const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
+  const child = spawn(binary, [], { env: { ...process.env, RELAY_REGISTRATION_KEY: key, HOST: '127.0.0.1', PORT: String(port) } });
+  const relay = { url: `http://127.0.0.1:${port}`, log: '' };
+  child.stdout.on('data', data => { relay.log += data; });
+  child.stderr.on('data', data => { relay.log += data; });
+  while (!relay.log.includes('listening')) {
+    assert.equal(child.exitCode, null, relay.log);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  relay.stop = async () => {
+    child.kill();
+    if (child.exitCode === null) await once(child, 'exit');
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return relay;
+}
 
 function loadInstalledClients(archive) {
   const descriptor = openSync(archive, 'r');
@@ -43,7 +71,7 @@ function loadInstalledClients(archive) {
 
 const archive = process.env.ALMA_ASAR;
 test('installed Alma 0.4.211: real E2E handshake, HTTP, streams, upload, WS and reconnect', {
-  skip: !archive && 'Set ALMA_ASAR to the local installed app.asar', timeout: process.env.ALMA_TEST_RELAY_URL ? 120000 : 30000
+  skip: !archive && 'Set ALMA_ASAR to the local installed app.asar', timeout: process.env.ALMA_TEST_RELAY_URL ? 120000 : 90000
 }, async context => {
   const { Desktop, Client, routingKey } = loadInstalledClients(archive);
   const key = process.env.ALMA_TEST_RELAY_URL ? process.env.ALMA_TEST_RELAY_KEY : randomBytes(32).toString('hex');
@@ -52,6 +80,8 @@ test('installed Alma 0.4.211: real E2E handshake, HTTP, streams, upload, WS and 
   const payloadSize = Number(process.env.ALMA_TEST_PAYLOAD_BYTES || 1024 * 1024);
   assert.ok(Number.isInteger(payloadSize) && payloadSize >= 256 && payloadSize <= 4 * 1024 * 1024);
   const payload = randomBytes(payloadSize);
+  const relay = process.env.ALMA_TEST_RELAY_URL ? null : await startRelay(key);
+  const base = process.env.ALMA_TEST_RELAY_URL || relay.url;
   const local = http.createServer(async (request, response) => {
     if (request.url === '/api/test') {
       response.writeHead(200, { 'Content-Type': 'application/json' });
@@ -72,12 +102,6 @@ test('installed Alma 0.4.211: real E2E handshake, HTTP, streams, upload, WS and 
   localSockets.on('connection', socket => socket.on('message', (data, binary) => socket.send(data, { binary })));
   local.listen(0, '127.0.0.1');
   await once(local, 'listening');
-  const relay = process.env.ALMA_TEST_RELAY_URL ? null : createRelay({ registrationKey: key });
-  if (relay) {
-    relay.server.listen(0, '127.0.0.1');
-    await once(relay.server, 'listening');
-  }
-  const base = process.env.ALMA_TEST_RELAY_URL || `http://127.0.0.1:${relay.server.address().port}`;
   const desktop = new Desktop({ serverUrl: base, connectCode: code, registrationKey: key,
     e2eEncryption: true, localPort: local.address().port, deviceName: 'Isolated compatibility test' });
   const clients = [];
@@ -100,6 +124,7 @@ test('installed Alma 0.4.211: real E2E handshake, HTTP, streams, upload, WS and 
   desktop.start();
   await connectedDesktop();
   context.diagnostic('Desktop registered');
+  if (relay) assert.match(relay.log, /registered, compression true/, 'Installed desktop should negotiate permessage-deflate');
   const client = new Client({ serverUrl: base, code, WebSocketImpl: WebSocket });
   clients.push(client);
   await client.connect();

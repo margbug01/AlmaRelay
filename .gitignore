@@ -10,3 +10,5 @@ node_modules/
 *.backup
 *.bak
 .DS_Store
+/alma-relay
+*.exe

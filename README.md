@@ -1,6 +1,6 @@
 # Private Alma Relay
 
-独立实现的 Alma 加密中继。运行时不依赖 Alma 官方中继、账号服务或官方服务端源码；没有复制官方服务端。只依赖 Node.js 和 `ws`，不需要数据库。
+独立实现的 Alma 加密中继。运行时不依赖 Alma 官方中继、账号服务或官方服务端源码；没有复制官方服务端。Go 写的单个静态二进制，只依赖 `gorilla/websocket`，不需要数据库，也不需要 Node 运行时（Node 只用来跑对照安装包的兼容测试）。
 
 本版本对照 Windows Alma **0.4.211** 的客户端协议实现。默认只允许端到端加密隧道，不支持关闭加密后的旧版 HTTP 代理，也不提供网页聊天界面。手机使用原有 Alma App。
 
@@ -10,6 +10,8 @@
 - `/agent?th=…` 与 `/c/<routing-key>/__alma_e2e__` 双向 WebSocket 转发。
 - 握手文本和加密二进制帧原样转发，多手机会话隔离；HTTP、流式输出、文件和 WebSocket 由两端在加密隧道内承载。
 - 注册/打开隧道超时、连接数限制、缓冲限制、消息大小限制、升级请求限速、浏览器 Origin 检查。
+- 手机超限只关它自己那条隧道（1009），不会连累桌面和其他手机；桌面发不动时手机上传会被暂停（背压），而不是把桌面断开。
+- 桌面这一段支持 permessage-deflate：桌面帧是 JSON 里装 base64 的密文，压缩后线上字节约等于原始字节，省掉 base64 的三分之一。手机那段本来就是密文，不压缩。Alma 桌面默认就会提议压缩，不用改设置。
 - 不落盘聊天数据，不输出配对链接、消息、注册密钥或请求路径。
 
 ## 边界
@@ -17,7 +19,7 @@
 - **没有 iPhone 后台 APNs 推送**：官方 App 的推送需要其开发者签名凭据。服务会明确回复 `unsupported`，不会假报成功，也不会转交官方服务。手机前台聊天与后台通知是两件事。
 - **不是 AI API 中继**：不会改变模型供应商速度。只替换手机/远程端与桌面的通信路径。
 - **单进程、单实例**：注册映射只存在内存，重启后桌面重连即可恢复；不要直接启动多个副本并随机负载均衡。
-- 限制：256 条连接、每桌面 16 条隧道、单 WebSocket 消息 16 MiB、每连接发送队列 32 MiB；桌面帧封装含 base64 膨胀，因此单个手机二进制消息的实际上限低于 16 MiB（约 12 MiB）。大文件是否可传取决于客户端是否分块，不承诺无限大小。超限断开而不是无限缓存。
+- 限制：256 条连接、每桌面 16 条隧道、单 WebSocket 消息 16 MiB、每连接发送队列 32 MiB。手机发往桌面的消息要包成 base64，所以手机单条消息上限是 12,582,864 字节（约 12 MiB），超过时只关闭这条手机隧道；桌面发往手机的二进制解码后自然不超过这个数。大文件是否可传取决于客户端是否分块，不承诺无限大小。
 - 每 TCP 来源每分钟最多 120 次 WebSocket 升级；反代后所有用户可能共用此额度，适合私人使用，不适合直接当公共服务。
 - 聊天隧道保留客户端自己的加密，服务仍可见连接元数据和路由标识。桌面单独发送的 APNs 通知帧不属于加密隧道，会收到但被丢弃、不存储。
 - 路由标识和配对链接都应当保密，关闭反代访问日志；有人掌握路由标识仍可能占用连接配额。注册密钥不是配对码：前者防止陌生桌面注册，后者用于客户端的端到端认证。
@@ -47,14 +49,13 @@ Caddy 会自动申请和续期证书，relay 的 8787 端口仅在 Compose 内�
 
 更新：保留 `.env`，替换源文件后 `docker compose up -d --build`。重启会中断正在进行的请求；不要在长任务过程中发布。恢复官方中继可在 Alma 设置里切回，再重新配对。
 
-## 已有反代 / 直接 Node
+## 已有反代 / 直接运行二进制
 
 ```bash
-npm ci --omit=dev --ignore-scripts
-node --env-file=.env server.mjs
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o alma-relay .
 ```
 
-默认监听 `127.0.0.1:8787`，使用 systemd 等进程管理器常驻，反代同一台机器的这个地址。需要设置环境变量时：
+把 `alma-relay` 放到服务器（例如 `/opt/alma-relay/alma-relay`），用 `deploy/alma-relay.service` 常驻，配置放 `/etc/alma-relay.env`。默认监听 `127.0.0.1:8787`，反代同一台机器的这个地址。`alma-relay -healthcheck` 请求本机 `/healthz`，成功退出码为 0。需要设置环境变量时：
 
 | 变量 | 含义 |
 | --- | --- |
@@ -91,14 +92,15 @@ location / {
 ## 测试和验证范围
 
 ```bash
-npm ci --ignore-scripts
-npm test
-npm audit --omit=dev --registry=https://registry.npmjs.org
+go test -race ./...
 ```
 
-普通测试不依赖 Alma。可选兼容测试直接在内存读取自己安装包的协议类（不复制到发布文件，不启动整套 Alma，不读取用户配置），连接隔离的假 API 服务：
+普通测试不依赖 Alma：协议、隔离、鉴权、资源限制、心跳、超大消息只关一条隧道、慢桌面背压、桌面段压缩率、解压后大小上限。
+
+可选兼容测试会编译并启动 Go 版中继，直接在内存读取自己安装包的协议类（不复制到发布文件，不启动整套 Alma，不读取用户配置），连接隔离的假 API 服务，并确认安装包的桌面类协商了压缩：
 
 ```bash
+npm ci --ignore-scripts
 ALMA_ASAR='/path/to/Alma/resources/app.asar' npm test
 ```
 
@@ -107,9 +109,9 @@ ALMA_ASAR='/path/to/Alma/resources/app.asar' npm test
 
 ## 文件
 
-- `server.mjs`：独立中继实现。
-- `test/relay.test.mjs`：协议、隔离、鉴权、资源限制测试。
-- `test/compat.test.mjs`：可选的已安装 Alma 协议兼容测试。
+- `relay.go`：中继实现；`main.go`：环境变量、监听、信号和健康检查。
+- `relay_test.go`：协议、隔离、鉴权、资源限制测试。
+- `test/compat.test.mjs`：可选的已安装 Alma 协议兼容测试（Node）。
 - `Dockerfile` / `compose.yaml` / `Caddyfile`：部署配置。
 - `.env.example`：配置示例，刻意不包含有效密钥。
 

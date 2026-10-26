@@ -1,9 +1,10 @@
 {
   "name": "private-alma-relay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
+  "description": "The relay is Go; Node only runs the compatibility test against installed Alma classes.",
   "engines": { "node": ">=22" },
-  "scripts": { "start": "node server.mjs", "test": "node --test" },
-  "dependencies": { "ws": "8.22.0" }
+  "scripts": { "test": "node --test" },
+  "devDependencies": { "ws": "8.22.0" }
 }

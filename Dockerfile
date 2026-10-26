@@ -1,10 +1,14 @@
-FROM node:22-alpine
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts --no-fund --no-audit
-COPY server.mjs ./
-USER node
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=8787
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY *.go ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /alma-relay .
+
+FROM scratch
+COPY --from=build /alma-relay /alma-relay
+USER 65534:65534
+ENV HOST=0.0.0.0 PORT=8787
 EXPOSE 8787
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD node -e "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["node", "server.mjs"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["/alma-relay", "-healthcheck"]
+ENTRYPOINT ["/alma-relay"]

@@ -9,9 +9,8 @@ StartLimitBurst=10
 Type=simple
 DynamicUser=true
 WorkingDirectory=/opt/alma-relay
-Environment=NODE_ENV=production
 EnvironmentFile=/etc/alma-relay.env
-ExecStart=/opt/alma-relay/runtime/bin/node /opt/alma-relay/server.mjs
+ExecStart=/opt/alma-relay/alma-relay
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=10
@@ -26,7 +25,7 @@ RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
 UMask=0077
-MemoryMax=512M
+MemoryMax=256M
 TasksMax=64
 
 [Install]
