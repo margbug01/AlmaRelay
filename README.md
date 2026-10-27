@@ -2,6 +2,8 @@
 
 独立实现的 Alma 加密中继。运行时不依赖 Alma 官方中继、账号服务或官方服务端源码；没有复制官方服务端。Go 写的单个静态二进制，只依赖 `gorilla/websocket`，不需要数据库，也不需要 Node 运行时（Node 只用来跑对照安装包的兼容测试）。
 
+**生产服务是纯 Go，仓库包含可选的 JavaScript 兼容测试。** GitHub 的语言占比会统计 `test/compat.test.mjs`；部署和运行中继不需要 Node/npm，Docker 最终镜像也只包含 Go 二进制。
+
 本版本对照 Windows Alma **0.4.211** 的客户端协议实现。默认只允许端到端加密隧道，不支持关闭加密后的旧版 HTTP 代理，也不提供网页聊天界面。手机使用原有 Alma App。
 
 ## 已实现
@@ -11,7 +13,7 @@
 - 握手文本和加密二进制帧原样转发，多手机会话隔离；HTTP、流式输出、文件和 WebSocket 由两端在加密隧道内承载。
 - 注册/打开隧道超时、连接数限制、缓冲限制、消息大小限制、升级请求限速、浏览器 Origin 检查。
 - 手机超限只关它自己那条隧道（1009），不会连累桌面和其他手机；桌面发不动时手机上传会被暂停（背压），而不是把桌面断开。
-- 桌面这一段支持 permessage-deflate：桌面帧是 JSON 里装 base64 的密文，压缩后线上字节约等于原始字节，省掉 base64 的三分之一。手机那段本来就是密文，不压缩。Alma 桌面默认就会提议压缩，不用改设置。
+- 桌面这一段支持 permessage-deflate：桌面帧是 JSON 里装 base64 的密文，压缩后线上字节约等于原始密文字节，基本消除 base64 约 33% 的体积膨胀，相比未压缩传输减少约 25% 的字节（具体取决于消息大小和内容）。手机那段本来就是密文，不压缩。Alma 桌面默认就会提议压缩，不用改设置。
 - 不落盘聊天数据，不输出配对链接、消息、注册密钥或请求路径。
 
 ## 边界
@@ -51,9 +53,13 @@ Caddy 会自动申请和续期证书，relay 的 8787 端口仅在 Compose 内�
 
 ## 已有反代 / 直接运行二进制
 
+自行编译需要 **Go 1.24 或更高版本**（以 `go.mod` 为准）；Docker 构建阶段使用 Go 1.27，不要求宿主机安装 Go。以下命令使用 Bash / Git Bash 语法，为 Linux x86-64 服务器构建：
+
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o alma-relay .
 ```
+
+ARM64 服务器将 `GOARCH=amd64` 改为 `GOARCH=arm64`。生产构建关闭 CGO，不需要 C 编译器，目标服务器也不需要安装 Go 或 Node。
 
 把 `alma-relay` 放到服务器（例如 `/opt/alma-relay/alma-relay`），用 `deploy/alma-relay.service` 常驻，配置放 `/etc/alma-relay.env`。默认监听 `127.0.0.1:8787`，反代同一台机器的这个地址。`alma-relay -healthcheck` 请求本机 `/healthz`，成功退出码为 0。需要设置环境变量时：
 
@@ -91,13 +97,25 @@ location / {
 
 ## 测试和验证范围
 
+普通单元测试只需要 Go，不需要 Node 或安装 Alma：
+
 ```bash
-go test -race ./...
+CGO_ENABLED=0 go test ./...
 ```
 
-普通测试不依赖 Alma：协议、隔离、鉴权、资源限制、心跳、超大消息只关一条隧道、慢桌面背压、桌面段压缩率、解压后大小上限。
+并发竞态检查使用以下命令，需要当前平台支持 Go race detector、启用 CGO，并在 PATH 中提供可用的 C 编译器（如 GCC/Clang；Windows 使用兼容的 MinGW-w64 工具链）：
+
+```bash
+CGO_ENABLED=1 go test -race ./...
+```
+
+这是测试工具的要求，不代表生产服务依赖 CGO。
+
+普通测试覆盖：协议、隔离、鉴权、资源限制、心跳、超大消息只关一条隧道、慢桌面背压、桌面段压缩率、解压后大小上限。
 
 可选兼容测试会编译并启动 Go 版中继，直接在内存读取自己安装包的协议类（不复制到发布文件，不启动整套 Alma，不读取用户配置），连接隔离的假 API 服务，并确认安装包的桌面类协商了压缩：
+
+需要 **Node.js 22+、npm、Go**，并确保 `go` 在 PATH 中。`ALMA_ASAR` 请替换为自己安装的 Alma `resources/app.asar` 路径；测试依赖版本相关的安装包标记，Alma 升级后可能需要适配。以下示例使用 Bash / Git Bash：
 
 ```bash
 npm ci --ignore-scripts
@@ -105,6 +123,8 @@ ALMA_ASAR='/path/to/Alma/resources/app.asar' npm test
 ```
 
 真实类测试覆盖加密握手、HTTP 请求、1 MiB 上传/下载逐字节核对、分段 SSE、内部 WebSocket 文本/二进制、桌面重新连接、错误加密码拒绝。用的是安装包里的桌面端、加密 responder 和远程 initiator 类，**不是手机原生 App 的真机测试**。特殊 handoff 路由处理器在测试中未加载，普通 HTTP/WS 代理和加密类使用原实现。
+
+验证记录：Go 单元测试及竞态检查、对照 Alma 0.4.211 的兼容测试，以及经正式域名的 1 MiB 加密全流程和真实桌面隧道验证已通过。这些是已有测试结果，不代表当前服务状态，也不保证后续 Alma 版本兼容。手机真机配对、iOS 后台行为、长期稳定性和 Docker 镜像运行仍未验证。
 
 
 ## 文件
